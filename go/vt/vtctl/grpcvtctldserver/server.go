@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -473,12 +474,8 @@ func (s *VtctldServer) BackupShard(req *vtctldatapb.BackupShardRequest, stream v
 
 	tablets, stats, err := reparentutil.ShardReplicationStatuses(ctx, s.ts, s.tmc, req.Keyspace, req.Shard)
 	// Instead of return on err directly, only return err when no tablets for backup at all
-	if err != nil {
-		tablets = reparentutil.GetBackupCandidates(tablets, stats)
-		// Only return err when no usable tablet
-		if len(tablets) == 0 {
-			return err
-		}
+	if err != nil && len(reparentutil.GetBackupCandidates(tablets, stats)) == 0 {
+		return err
 	}
 
 	var (
@@ -493,8 +490,8 @@ func (s *VtctldServer) BackupShard(req *vtctldatapb.BackupShardRequest, stream v
 			continue
 		}
 
-		// ignore tablet with an unknown replication lag status
-		if stats[i].ReplicationLagUnknown {
+		// ignore a tablet whose replication lag status is missing or unknown
+		if stats[i] == nil || stats[i].ReplicationLagUnknown {
 			continue
 		}
 
@@ -1226,7 +1223,15 @@ func (s *VtctldServer) DeleteShards(ctx context.Context, req *vtctldatapb.Delete
 	span.Annotate("recursive", req.Recursive)
 	span.Annotate("force", req.Force)
 
+	// Skip repeated shards: without Force, the second delete would fail to
+	// lock the shard that the first one deleted.
+	deleted := make(map[string]bool, len(req.Shards))
 	for _, shard := range req.Shards {
+		key := topoproto.KeyspaceShardString(shard.Keyspace, shard.Name)
+		if deleted[key] {
+			continue
+		}
+		deleted[key] = true
 		if err2 := deleteShard(ctx, s.ts, shard.Keyspace, shard.Name, req.Recursive, req.EvenIfServing, req.Force); err2 != nil {
 			err = err2
 			return nil, err
@@ -4880,8 +4885,9 @@ func (s *VtctldServer) ValidatePermissionsKeyspace(ctx context.Context, req *vtc
 
 	var shards []string
 	if len(req.Shards) != 0 {
-		// If the user has specified a list of specific shards, we'll use that.
-		shards = req.Shards
+		// If the user has specified a list of specific shards, we'll use that,
+		// without repeats.
+		shards = slices.Compact(slices.Sorted(slices.Values(req.Shards)))
 	} else {
 		// Validate all of the shards.
 		shards, err = s.ts.GetShardNames(ctx, req.Keyspace)
@@ -4971,8 +4977,9 @@ func (s *VtctldServer) ValidateSchemaKeyspace(ctx context.Context, req *vtctldat
 
 	var shards []string
 	if len(req.Shards) != 0 {
-		// If the user has specified a list of specific shards, we'll use that.
-		shards = req.Shards
+		// If the user has specified a list of specific shards, we'll use that,
+		// without repeats.
+		shards = slices.Compact(slices.Sorted(slices.Values(req.Shards)))
 	} else {
 		// Otherwise we look at all the shards in the keyspace.
 		shards, err = s.ts.GetShardNames(ctx, keyspace)
@@ -5452,7 +5459,8 @@ func (s *VtctldServer) ValidateVSchema(ctx context.Context, req *vtctldatapb.Val
 
 	defer panicHandler(&err)
 	keyspace := req.Keyspace
-	shards := req.Shards
+	// Validate each shard once, even if the request repeats it.
+	shards := slices.Compact(slices.Sorted(slices.Values(req.Shards)))
 	excludeTables := req.ExcludeTables
 	includeViews := req.IncludeViews
 

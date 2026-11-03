@@ -17,11 +17,14 @@ limitations under the License.
 package binlogplayer
 
 import (
+	"net"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"vitess.io/vitess/go/constants/sidecar"
+	"vitess.io/vitess/go/mysql"
 	"vitess.io/vitess/go/vt/dbconfigs"
 	"vitess.io/vitess/go/vt/sqlparser"
 )
@@ -44,4 +47,21 @@ func TestNewDBClientWithSidecarName(t *testing.T) {
 			assert.Equal(t, "_vt_custom_0", impl.sidecarDBName)
 		}
 	})
+}
+
+// TestSetMultiStatementsOnAClosedConnection covers what a dead connection
+// remembers. Closing it leaves the capability it negotiated on record, so a
+// client that answered from that would tell its caller the capability was
+// granted on a connection that cannot carry it, and the caller would go on to
+// build a batch for it.
+func TestSetMultiStatementsOnAClosedConnection(t *testing.T) {
+	client, server := net.Pipe()
+	t.Cleanup(func() { server.Close() })
+
+	conn := mysql.NewConnForTest(client)
+	conn.Capabilities = mysql.CapabilityClientMultiStatements
+	conn.Close()
+
+	dc := &dbClientImpl{dbConn: conn}
+	require.Error(t, dc.SetMultiStatements(true), "a closed connection cannot grant the capability, whatever it last negotiated")
 }
