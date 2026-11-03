@@ -70,7 +70,13 @@ else
         # Initialize MySQL data directory if it doesn't exist
         if [[ ! -d "${VTDATAROOT}/mysql-topo/mysql" ]]; then
             echo "Initializing MySQL data directory..."
-            mysqld --initialize-insecure --user=vitess --datadir="${VTDATAROOT}/mysql-topo" > "${VTDATAROOT}/tmp/mysql-init.out" 2>&1
+            # --no-defaults: the packaged my.cnf sets a log-error path the
+            # vitess user cannot write, which aborts the initialization.
+            if ! mysqld --no-defaults --initialize-insecure --user=vitess --datadir="${VTDATAROOT}/mysql-topo" > "${VTDATAROOT}/tmp/mysql-init.out" 2>&1; then
+                echo "Failed to initialize the MySQL data directory:"
+                cat "${VTDATAROOT}/tmp/mysql-init.out"
+                exit 1
+            fi
         fi
         
         # Start MySQL server
